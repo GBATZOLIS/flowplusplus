@@ -18,8 +18,19 @@ import util
 from models import FlowPlusPlus
 from tqdm import tqdm
 
+from data.create_dataset import create_dataset
+from data.template_dataset import TemplateDataset
 
 def main(args):
+    #Create the dataset if it is not in place
+    create_dataset(master_path=args.dataroot, resize_size=args.load_size, dataset_size=args.max_dataset_size)
+    trainset = TemplateDataset(args, phase='train', domain=args.domain)
+    trainloader = data.DataLoader(trainset, batch_size=args.batch_size,
+                                num_workers=args.num_workers)
+    testset = TemplateDataset(args, phase='val', domain=args.domain)
+    testloader = data.DataLoader(testset, batch_size=args.batch_size,
+                                num_workers=args.num_workers)
+    
     # Set up main device and scale batch size
     device = 'cuda' if torch.cuda.is_available() and args.gpu_ids else 'cpu'
     args.batch_size *= max(1, len(args.gpu_ids))
@@ -31,6 +42,7 @@ def main(args):
     torch.cuda.manual_seed_all(args.seed)
 
     # No normalization applied, since model expects inputs in (0, 1)
+    """
     transform_train = transforms.Compose([
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor()
@@ -45,11 +57,12 @@ def main(args):
 
     testset = torchvision.datasets.CIFAR10(root='data', train=False, download=True, transform=transform_test)
     testloader = data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    """
 
     # Model
     print('Building model..')
-    net = FlowPlusPlus(scales=[(0, 4), (2, 3)],
-                       in_shape=(3, 32, 32),
+    net = FlowPlusPlus(scales=[(4, 4), (5, 5), (6, 6), (6, 6)],
+                       in_shape=(3, args.load_size, args.load_size),
                        mid_channels=args.num_channels,
                        num_blocks=args.num_blocks,
                        num_dequant_blocks=args.num_dequant_blocks,
@@ -57,6 +70,13 @@ def main(args):
                        use_attn=args.use_attn,
                        drop_prob=args.drop_prob)
     net = net.to(device)
+    pytorch_total_params = sum(p.numel() for p in net.parameters())
+
+    print('--- Model Summary ---')
+    print('NUMBER OF PARAMETERS: ', pytorch_total_params)
+    pytorch_trainable_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    print('NUMBER OF TRAINABLE PARAMETERS: ', pytorch_trainable_params)
+    
     if device == 'cuda':
         net = torch.nn.DataParallel(net, args.gpu_ids)
         cudnn.benchmark = args.benchmark
@@ -93,10 +113,11 @@ def train(epoch, net, trainloader, device, optimizer, scheduler, loss_fn, max_gr
     net.train()
     loss_meter = util.AverageMeter()
     with tqdm(total=len(trainloader.dataset)) as progress_bar:
-        for x, _ in trainloader:
+        for x in trainloader:
             x = x.to(device)
             optimizer.zero_grad()
             z, sldj = net(x, reverse=False)
+            print(z.size())
             loss = loss_fn(z, sldj)
             loss_meter.update(loss.item(), x.size(0))
             loss.backward()
@@ -169,9 +190,19 @@ if __name__ == '__main__':
     def str2bool(s):
         return s.lower().startswith('t')
 
+    #extra arguments -> by me
+    #dataset-specific
+    parser.add_argument('--dataroot', default='datasets/edges2shoes', help='path to images')
+    parser.add_argument('--load-size', type=int, default=64)
+    parser.add_argument('--preprocess', default=['resize'])
+    parser.add_argument('--no-flip', default=True, action='store_false', help='if specified, do not flip the images for data argumentation')
+    parser.add_argument('--max-dataset-size', type=int, default=500, help='Maximum number of samples allowed per dataset. \
+                                                                                Set to float("inf") if you want to use the entire training dataset')
+    parser.add_argument('--domain', type=str, default='B', help='domain to train. Options=[A, B]')
+    #----
     parser.add_argument('--batch_size', default=8, type=int, help='Batch size per GPU')
     parser.add_argument('--benchmark', type=str2bool, default=True, help='Turn on CUDNN benchmarking')
-    parser.add_argument('--gpu_ids', default=[0, 1, 2, 3], type=eval, help='IDs of GPUs to use')
+    parser.add_argument('--gpu_ids', default=[0, 1, 2, 3], type=list, help='IDs of GPUs to use')
     parser.add_argument('--lr', default=1e-3, type=float, help='Peak learning rate')
     parser.add_argument('--max_grad_norm', type=float, default=1., help='Max gradient norm for clipping')
     parser.add_argument('--drop_prob', type=float, default=0.2, help='Dropout probability')
@@ -179,7 +210,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_components', default=32, type=int, help='Number of components in the mixture')
     parser.add_argument('--num_dequant_blocks', default=2, type=int, help='Number of blocks in dequantization')
     parser.add_argument('--num_channels', default=96, type=int, help='Number of channels in Flow++')
-    parser.add_argument('--num_epochs', default=100, type=int, help='Number of epochs to train')
+    parser.add_argument('--num_epochs', default=1000, type=int, help='Number of epochs to train')
     parser.add_argument('--num_samples', default=64, type=int, help='Number of samples at test time')
     parser.add_argument('--num_workers', default=4, type=int, help='Number of data loader threads')
     parser.add_argument('--resume', type=str2bool, default=False, help='Resume from checkpoint')
